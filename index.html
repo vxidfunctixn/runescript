@@ -263,6 +263,11 @@
   <script>
     const bust = Date.now();
 
+    // Strona statyczna (docs/index.html generowane przez build_font.py) niesie
+    // fonty i listę znaków wbudowane w HTML — wtedy nie ma czego pobierać.
+    // W trybie deweloperskim tego obiektu nie ma i lecimy fetchem do public/.
+    const EMBED = window.__RUNESCRIPT_EMBED__ || null;
+
     // --- regulowane proporcje panelu (zapisywane w localStorage) -------------
     const LAYOUT_KEY = "runescript.layout";
     const PANEL_W_DEFAULT = 350;   // px; odpowiednik --panel-w w CSS
@@ -327,7 +332,8 @@
     // --- ładowanie fontów zawsze ze świeżego pliku (omijamy cache przeglądarki) ---
     [["RuneScript", "runescript.ttf"],
      ["RuneScript Monospace", "runescript-monospace.ttf"]].forEach(([family, file]) => {
-      new FontFace(family, `url(${file}?t=${bust}) format("truetype")`).load()
+      const src = EMBED ? EMBED.fonts[file] : `${file}?t=${bust}`;
+      new FontFace(family, `url(${src}) format("truetype")`).load()
         .then(f => document.fonts.add(f))
         .catch(err => console.error("Nie udało się wczytać fontu", family, err));
     });
@@ -426,8 +432,7 @@
     selectFont(2);           // RuneScript Regular
 
     // --- grid ze wszystkimi znakami czcionki --------------------------------
-    fetch(`characters.json?t=${bust}`)
-      .then(r => r.json())
+    (EMBED ? Promise.resolve(EMBED.characters) : fetch(`characters.json?t=${bust}`).then(r => r.json()))
       .then(data => {
         // 'glyphs' niesie nazwę runy; starsze characters.json ma tylko listę znaków
         const glyphs = data.glyphs

@@ -68,6 +68,12 @@ PUBLIC_DIR = os.path.join(HERE, "public")
 OUT = os.path.join(PUBLIC_DIR, "runescript.ttf")                 # wariant proporcjonalny
 OUT_MONO = os.path.join(PUBLIC_DIR, "runescript-monospace.ttf")  # wariant monospace
 
+# Strona statyczna dla GitHub Pages (Source: branch main, katalog /docs).
+# Jeden samowystarczalny plik: fonty i lista znaków wklejone w HTML, więc
+# nie ma żadnych pobrań w runtime i nie trzeba wersjonować artefaktów binarnych.
+DOCS_DIR = os.path.join(HERE, "docs")
+TEMPLATE_HTML = os.path.join(HERE, "index.html")
+
 FNAME_RE = re.compile(
     r"Letter=(?P<letter>.+?),\s*Name=(?P<name>.*?),\s*Width=(?P<width>[\d.]+)\.svg$")
 PATH_TAG_RE = re.compile(r"<path\b[^>]*>", re.DOTALL)   # każdy element <path ...>
@@ -601,6 +607,43 @@ def write_characters_json(files, out_path):
     print(f"Zapisano znaki do: {out_path}")
 
 
+def write_static_page(files, out_path):
+    """Generuje samowystarczalny docs/index.html na bazie index.html.
+
+    Do <head> wstrzykujemy window.__RUNESCRIPT_EMBED__ z listą znaków oraz
+    fontami jako data: URL — strona działa wtedy z dowolnego katalogu i bez
+    żadnego fetcha (na GitHub Pages nie ma public/ ani serwera dev)."""
+    import base64
+    import json
+
+    entries = sorted_glyph_entries(files)
+    fonts = {}
+    for name in ("runescript.ttf", "runescript-monospace.ttf"):
+        with open(os.path.join(PUBLIC_DIR, name), "rb") as fh:
+            data = base64.b64encode(fh.read()).decode("ascii")
+        fonts[name] = "data:font/ttf;base64," + data
+
+    embed = {
+        "characters": {"characters": [e["char"] for e in entries], "glyphs": entries},
+        "fonts": fonts,
+    }
+    # </ w treści JSON-a zakończyłoby przedwcześnie tag <script>
+    payload = json.dumps(embed, ensure_ascii=False).replace("</", "<\\/")
+
+    with open(TEMPLATE_HTML, "r", encoding="utf-8") as fh:
+        html = fh.read()
+    if "</head>" not in html:
+        raise SystemExit(f"Brak </head> w {TEMPLATE_HTML} — nie wiem, gdzie wstrzyknąć dane")
+    html = html.replace(
+        "</head>",
+        f"  <script>window.__RUNESCRIPT_EMBED__ = {payload};</script>\n</head>", 1)
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    print(f"Zapisano stronę statyczną do: {out_path}")
+
+
 def main(mono_px=MONO_PX, letter_space=LETTER_SPACE_PX, y_shift=Y_SHIFT_PX,
          ink_em_ratio=INK_EM_RATIO):
     files = sorted(glob.glob(os.path.join(SVG_DIR, "*.svg")))
@@ -619,6 +662,9 @@ def main(mono_px=MONO_PX, letter_space=LETTER_SPACE_PX, y_shift=Y_SHIFT_PX,
 
     # wygeneruj JSON z posorowanymi znakami do frontend:
     write_characters_json(files, os.path.join(PUBLIC_DIR, "characters.json"))
+
+    # strona statyczna dla GitHub Pages — wszystko wbudowane w jeden plik:
+    write_static_page(files, os.path.join(DOCS_DIR, "index.html"))
 
 
 if __name__ == "__main__":
