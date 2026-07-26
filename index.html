@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RuneScript — podgląd</title>
   <style>
-    /* Fonty NIE są ładowane przez @font-face — robi to skrypt z cache-bustingiem,
-       aby podgląd zawsze czytał świeży plik .ttf (patrz <script> na dole). */
+    /* Fonty NIE są ładowane przez @font-face — rejestruje je skrypt na dole
+       z danych wklejonych w stronę przez build_font.py (patrz <script>). */
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -261,11 +261,9 @@
   </section>
 
   <script>
-    const bust = Date.now();
-
-    // Strona statyczna (docs/index.html generowane przez build_font.py) niesie
-    // fonty i listę znaków wbudowane w HTML — wtedy nie ma czego pobierać.
-    // W trybie deweloperskim tego obiektu nie ma i lecimy fetchem do public/.
+    // Ten plik jest tylko szablonem — gotową stronę (dist/index.html) składa
+    // build_font.py, wstrzykując tu fonty i listę znaków. Bez tego nie ma czego
+    // pokazać, bo nic nie jest pobierane w runtime.
     const EMBED = window.__RUNESCRIPT_EMBED__ || null;
 
     // --- regulowane proporcje panelu (zapisywane w localStorage) -------------
@@ -329,11 +327,10 @@
     addEventListener("resize", applyLayout);
     applyLayout();
 
-    // --- ładowanie fontów zawsze ze świeżego pliku (omijamy cache przeglądarki) ---
+    // --- fonty wklejone w stronę jako data: URL (patrz write_static_page) ------
     [["RuneScript", "runescript.ttf"],
      ["RuneScript Monospace", "runescript-monospace.ttf"]].forEach(([family, file]) => {
-      const src = EMBED ? EMBED.fonts[file] : `${file}?t=${bust}`;
-      new FontFace(family, `url(${src}) format("truetype")`).load()
+      new FontFace(family, `url(${EMBED ? EMBED.fonts[file] : ""}) format("truetype")`).load()
         .then(f => document.fonts.add(f))
         .catch(err => console.error("Nie udało się wczytać fontu", family, err));
     });
@@ -432,19 +429,15 @@
     selectFont(2);           // RuneScript Regular
 
     // --- grid ze wszystkimi znakami czcionki --------------------------------
-    (EMBED ? Promise.resolve(EMBED.characters) : fetch(`characters.json?t=${bust}`).then(r => r.json()))
-      .then(data => {
-        // 'glyphs' niesie nazwę runy; starsze characters.json ma tylko listę znaków
-        const glyphs = data.glyphs
-          || (data.characters || []).map(char => ({ char, name: "" }));
-        renderGrid(glyphs);
-        input.value = glyphs.map(g => g.char).join("");
-      })
-      .catch(err => {
-        console.error("Nie udało się wczytać characters.json", err);
-        document.getElementById("grid").innerHTML =
-          '<p class="empty">Błąd: brak characters.json — uruchom <code>python build_font.py</code></p>';
-      });
+    if (EMBED) {
+      const glyphs = EMBED.characters.glyphs;
+      renderGrid(glyphs);
+      input.value = glyphs.map(g => g.char).join("");
+    } else {
+      document.getElementById("grid").innerHTML =
+        '<p class="empty">To jest szablon — otwórz <code>dist/index.html</code> ' +
+        '(generuje je <code>python build_font.py</code>)</p>';
+    }
 
     function renderGrid(glyphs) {
       const grid = document.getElementById("grid");

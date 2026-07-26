@@ -61,12 +61,10 @@ MONO_PX = 9          # szerokość komórki w wariancie monospace (px)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SVG_DIR = os.path.join(HERE, "svg")
-# Artefakty lądują w public/ — Vite serwuje ten katalog spod „/" i kopiuje go
-# do dist/ przy budowaniu. Pliki pobierane w runtime (fetch/FontFace) muszą tam
-# leżeć, bo Vite nie widzi ich w grafie importów i inaczej by ich nie wydał.
-PUBLIC_DIR = os.path.join(HERE, "public")
-OUT = os.path.join(PUBLIC_DIR, "runescript.ttf")                 # wariant proporcjonalny
-OUT_MONO = os.path.join(PUBLIC_DIR, "runescript-monospace.ttf")  # wariant monospace
+# Gotowe pliki czcionki — stąd bierze je też strona statyczna (wkleja je do HTML).
+FONTS_DIR = os.path.join(HERE, "fonts")
+OUT = os.path.join(FONTS_DIR, "runescript.ttf")                 # wariant proporcjonalny
+OUT_MONO = os.path.join(FONTS_DIR, "runescript-monospace.ttf")  # wariant monospace
 
 # Strona statyczna dla GitHub Pages ląduje w dist/ — jeden samowystarczalny plik:
 # fonty i lista znaków wklejone w HTML, więc nie ma żadnych pobrań w runtime.
@@ -593,32 +591,19 @@ def sorted_characters(files):
     return [e["char"] for e in sorted_glyph_entries(files)]
 
 
-def write_characters_json(files, out_path):
-    """Zapisuje JSON ze znakami do wczytania przez frontend.
-
-    'characters' to płaska lista znaków, 'glyphs' te same znaki z nazwą runy
-    i szerokością — strona prezentacyjna korzysta z 'glyphs'."""
-    import json
-    entries = sorted_glyph_entries(files)
-    payload = {"characters": [e["char"] for e in entries], "glyphs": entries}
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=1)
-    print(f"Zapisano znaki do: {out_path}")
-
-
 def write_static_page(files, out_path):
-    """Generuje samowystarczalny docs/index.html na bazie index.html.
+    """Generuje samowystarczalny dist/index.html na bazie index.html.
 
     Do <head> wstrzykujemy window.__RUNESCRIPT_EMBED__ z listą znaków oraz
     fontami jako data: URL — strona działa wtedy z dowolnego katalogu i bez
-    żadnego fetcha (na GitHub Pages nie ma public/ ani serwera dev)."""
+    żadnego fetcha, także otwarta prosto z dysku."""
     import base64
     import json
 
     entries = sorted_glyph_entries(files)
     fonts = {}
     for name in ("runescript.ttf", "runescript-monospace.ttf"):
-        with open(os.path.join(PUBLIC_DIR, name), "rb") as fh:
+        with open(os.path.join(FONTS_DIR, name), "rb") as fh:
             data = base64.b64encode(fh.read()).decode("ascii")
         fonts[name] = "data:font/ttf;base64," + data
 
@@ -648,7 +633,7 @@ def main(mono_px=MONO_PX, letter_space=LETTER_SPACE_PX, y_shift=Y_SHIFT_PX,
     files = sorted(glob.glob(os.path.join(SVG_DIR, "*.svg")))
     if not files:
         raise SystemExit(f"Brak plików SVG w {SVG_DIR}")
-    os.makedirs(PUBLIC_DIR, exist_ok=True)
+    os.makedirs(FONTS_DIR, exist_ok=True)
 
     # ustal skalę, linię bazową i metryki pionowe z geometrii (zanim zbudujemy glify):
     resolve_metrics(files, y_shift, ink_em_ratio)
@@ -658,9 +643,6 @@ def main(mono_px=MONO_PX, letter_space=LETTER_SPACE_PX, y_shift=Y_SHIFT_PX,
                monospace=False, mono_px=mono_px, letter_space=letter_space)
     build_font(files, OUT_MONO, "RuneScript Monospace",
                monospace=True, mono_px=mono_px, letter_space=letter_space)
-
-    # wygeneruj JSON z posorowanymi znakami do frontend:
-    write_characters_json(files, os.path.join(PUBLIC_DIR, "characters.json"))
 
     # strona statyczna dla GitHub Pages — wszystko wbudowane w jeden plik:
     write_static_page(files, os.path.join(DIST_DIR, "index.html"))
