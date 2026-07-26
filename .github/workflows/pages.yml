@@ -36,7 +36,9 @@ jobs:
           cache: yarn
 
       - name: Install JS deps
-        run: yarn install --frozen-lockfile
+        run: |
+          rm -rf node_modules
+          yarn install --frozen-lockfile
 
       - name: Build site
         run: yarn build
