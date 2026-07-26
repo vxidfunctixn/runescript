@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RuneScript — podgląd</title>
+  <style>
+    /* Fonty NIE są ładowane przez @font-face — robi to skrypt z cache-bustingiem,
+       aby podgląd zawsze czytał świeży plik .ttf (patrz <script> na dole). */
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #1a1a1a;
+      --bg-soft: #171717;
+      --line: #2b2b2b;
+      --fg: #e0e0e0;
+      --fg-dim: #7a7a7a;
+      --accent: #d8b26a;
+      --thumb: #3a3a3a;
+      --thumb-hover: #4e4e4e;
+
+      /* proporcje panelu — nadpisywane z localStorage przez skrypt */
+      --panel-w: 350px;   /* trzymaj zgodnie z PANEL_W_DEFAULT w skrypcie */
+      --composer-h: 33.333vh;
+    }
+
+    /* --- scrollbary ------------------------------------------------------- */
+    /* Firefox (standard) */
+    * { scrollbar-width: thin; scrollbar-color: var(--thumb) transparent; }
+
+    /* WebKit/Blink — nie czyta powyższych właściwości */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb {
+      background: var(--thumb);
+      border-radius: 6px;
+      /* przezroczysta ramka zwęża uchwyt, zostawiając margines od krawędzi */
+      border: 2px solid transparent;
+      background-clip: padding-box;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--thumb-hover);
+      background-clip: padding-box;
+    }
+    ::-webkit-scrollbar-corner { background: transparent; }
+
+    html, body { height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: Arial, Helvetica, sans-serif;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* --- sekcja tekstowa (wysokość regulowana uchwytem) -------------------- */
+    .composer {
+      flex: 0 0 var(--composer-h);
+      display: flex;
+      min-height: 0;
+    }
+
+    /* --- uchwyty zmiany proporcji ------------------------------------------ */
+    .gutter {
+      flex: 0 0 7px;
+      position: relative;
+      background: var(--bg-soft);
+      touch-action: none;   /* nie oddawaj gestu przewijaniu strony */
+    }
+    .gutter::before {
+      content: "";
+      position: absolute;
+      background: var(--line);
+    }
+    .gutter-x { cursor: col-resize; }
+    .gutter-y { cursor: row-resize; }
+    .gutter-x::before { top: 0; bottom: 0; left: 3px; width: 1px; }
+    .gutter-y::before { left: 0; right: 0; top: 3px; height: 1px; }
+    .gutter:hover::before, .gutter.active::before { background: var(--accent); }
+    .gutter-x:hover::before, .gutter-x.active::before { left: 2px; width: 3px; }
+    .gutter-y:hover::before, .gutter-y.active::before { top: 2px; height: 3px; }
+
+    /* w trakcie ciągnięcia nie zaznaczaj tekstu i utrzymaj kursor uchwytu */
+    body.dragging { user-select: none; }
+    body.dragging-x, body.dragging-x * { cursor: col-resize !important; }
+    body.dragging-y, body.dragging-y * { cursor: row-resize !important; }
+
+    .composer textarea {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 1.25rem;
+      border: none;
+      outline: none;
+      resize: none;
+      background: var(--bg);
+      color: var(--fg);
+      font-size: 42px;
+      line-height: 1;
+      caret-color: var(--fg);
+    }
+    .composer textarea::placeholder { color: #555; }
+
+    /* --- panel sterowania po prawej stronie inputa ------------------------- */
+    .switcher {
+      flex: 0 0 auto;
+      width: var(--panel-w);
+      display: flex;
+      flex-direction: column;
+      gap: 1.1rem;
+      padding: 0.9rem;
+      background: var(--bg-soft);
+      overflow-y: auto;
+    }
+    .switcher .group { display: flex; flex-direction: column; gap: 4px; }
+    .switcher .label {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 0.5rem;
+      font-size: 0.62rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--fg-dim);
+      padding: 0 0.15rem 0.25rem;
+      user-select: none;
+    }
+    .switcher .label b {
+      font-weight: 600;
+      letter-spacing: 0;
+      color: var(--accent);
+    }
+
+    .switcher button {
+      appearance: none;
+      text-align: left;
+      white-space: nowrap;
+      padding: 0.45rem 0.8rem;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--fg-dim);
+      font: inherit;
+      font-size: 0.8rem;
+      cursor: pointer;
+    }
+    .switcher button:hover { color: var(--fg); background: #202020; }
+    .switcher button[aria-pressed="true"] {
+      color: var(--accent);
+      border-color: #3a3227;
+      background: #221d15;
+    }
+
+    /* czcionki: siatka 2x2; grid-auto-rows wyrównuje wysokość obu wierszy,
+       mimo że „RuneScript Monospace" łamie się na dwie linie */
+    .switcher .grid2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-auto-rows: 1fr;
+      gap: 4px;
+    }
+    .switcher .grid2 button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      white-space: normal;
+      line-height: 1.25;
+      padding: 0.5rem 0.4rem;
+    }
+
+    /* suwaki — skokowe, wartości z list SIZES / LINE_HEIGHTS / LETTER_SPACINGS */
+    .switcher input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .switcher .ticks {
+      display: flex;
+      justify-content: space-between;
+      padding: 0 0.1rem;
+      font-size: 0.6rem;
+      color: #5a5a5a;
+      user-select: none;
+    }
+
+    /* --- grid znaków ------------------------------------------------------- */
+    .sheet { flex: 1 1 auto; overflow-y: auto; padding: 1rem; min-height: 0; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+      gap: 0.6rem;
+    }
+
+    .cell {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg-soft);
+      overflow: hidden;
+    }
+
+    /* wiersz 1: znak — po lewej runa, po prawej Arial 50% */
+    .cell .glyphs { display: flex; }
+    .cell .glyphs > div {
+      flex: 1 1 0;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 84px;
+      font-size: 44px;
+      line-height: 1;
+    }
+    .cell .rune  { font-family: "RuneScript", monospace; color: var(--fg); }
+    .cell .plain {
+      font-family: Arial, Helvetica, sans-serif;
+      color: #fff;
+      opacity: 0.5;
+      border-left: 1px solid var(--line);
+    }
+
+    /* wiersz 2: podpis */
+    .cell .caption {
+      border-top: 1px solid var(--line);
+      padding: 0.4rem 0.5rem;
+      text-align: center;
+      font-size: 0.68rem;
+      color: var(--fg-dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .sheet .empty { color: var(--fg-dim); font-size: 0.85rem; }
+  </style>
+  <script>window.__RUNESCRIPT_EMBED__ = {"characters": {"characters": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "Ą", "Ć", "Ę", "Ł", "Ń", "Ó", "Ś", "Ź", "Ż", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "!", "\"", "#", "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/", ":", ";", "<", "=", ">", "?", "@", "[", "\\", "]", "^", "_", "`", "{", "|", "}", "~"], "glyphs": [{"char": "A", "name": "Ansuz", "width": 5.0}, {"char": "B", "name": "Berkanan", "width": 5.0}, {"char": "C", "name": "Cén", "width": 5.0}, {"char": "D", "name": "Dagaz", "width": 9.0}, {"char": "E", "name": "Ehwaz", "width": 9.0}, {"char": "F", "name": "Fehu", "width": 5.0}, {"char": "G", "name": "Gebo", "width": 9.0}, {"char": "H", "name": "Haglaz", "width": 9.0}, {"char": "I", "name": "Isaz", "width": 3.0}, {"char": "J", "name": "Jera", "width": 9.0}, {"char": "K", "name": "Kaunan", "width": 5.0}, {"char": "L", "name": "Laguz", "width": 5.0}, {"char": "M", "name": "Mannaz", "width": 9.0}, {"char": "N", "name": "Naudiz", "width": 5.0}, {"char": "O", "name": "Opala", "width": 9.0}, {"char": "P", "name": "Peorð", "width": 5.0}, {"char": "Q", "name": "Kuruz", "width": 9.0}, {"char": "R", "name": "Raido", "width": 5.0}, {"char": "S", "name": "Sowilo", "width": 5.0}, {"char": "T", "name": "Tiwaz", "width": 9.0}, {"char": "U", "name": "Uruz", "width": 9.0}, {"char": "V", "name": "Vend", "width": 9.0}, {"char": "W", "name": "Wynn", "width": 5.0}, {"char": "X", "name": "Skald", "width": 9.0}, {"char": "Y", "name": "Yr", "width": 9.0}, {"char": "Z", "name": "Zona", "width": 5.0}, {"char": "Ą", "name": "Ansuz stung", "width": 5.0}, {"char": "Ć", "name": "Cén stung", "width": 5.0}, {"char": "Ę", "name": "Ehwaz stung", "width": 9.0}, {"char": "Ł", "name": "Laguz stung", "width": 5.0}, {"char": "Ń", "name": "Naudiz stung", "width": 5.0}, {"char": "Ó", "name": "Opala stung", "width": 9.0}, {"char": "Ś", "name": "Sowilo stumb", "width": 5.0}, {"char": "Ź", "name": "Zona dubel-stung", "width": 5.0}, {"char": "Ż", "name": "Zona stung", "width": 5.0}, {"char": "0", "name": "Zero", "width": 5.0}, {"char": "1", "name": "Jeden", "width": 5.0}, {"char": "2", "name": "Dwa", "width": 5.0}, {"char": "3", "name": "Trzy", "width": 5.0}, {"char": "4", "name": "Cztery", "width": 5.0}, {"char": "5", "name": "Pięć", "width": 5.0}, {"char": "6", "name": "Sześć", "width": 5.0}, {"char": "7", "name": "Siedem", "width": 5.0}, {"char": "8", "name": "Osiem", "width": 5.0}, {"char": "9", "name": "Dziewięć", "width": 5.0}, {"char": "!", "name": "Wykrzyknik", "width": 5.0}, {"char": "\"", "name": "Cudzysłów", "width": 5.0}, {"char": "#", "name": "Kratka", "width": 9.0}, {"char": "$", "name": "Dolar", "width": 9.0}, {"char": "%", "name": "Procent", "width": 9.0}, {"char": "&", "name": "Ampersand", "width": 5.0}, {"char": "'", "name": "Apostrof", "width": 3.0}, {"char": "(", "name": "Nawias lewy", "width": 3.0}, {"char": ")", "name": "Nawias prawy", "width": 3.0}, {"char": "*", "name": "Mnożnik", "width": 5.0}, {"char": "+", "name": "Plus", "width": 5.0}, {"char": ",", "name": "Przecinek", "width": 3.0}, {"char": "-", "name": "Minus", "width": 5.0}, {"char": ".", "name": "Kropka", "width": 3.0}, {"char": "/", "name": "Ukośnik", "width": 9.0}, {"char": ":", "name": "Dwukropek", "width": 3.0}, {"char": ";", "name": "Średnik", "width": 5.0}, {"char": "<", "name": "Mniej", "width": 5.0}, {"char": "=", "name": "Równianie", "width": 5.0}, {"char": ">", "name": "Więcej", "width": 5.0}, {"char": "?", "name": "Pytajnik", "width": 5.0}, {"char": "@", "name": "Małpa", "width": 5.0}, {"char": "[", "name": "Nawias kwadratowy lewy", "width": 3.0}, {"char": "\\", "name": "Odwrotny ukośnik", "width": 9.0}, {"char": "]", "name": "Nawias kwadratowy prawy", "width": 3.0}, {"char": "^", "name": "Daszek", "width": 5.0}, {"char": "_", "name": "Podkreślnik", "width": 5.0}, {"char": "`", "name": "Ukośny apostrof", "width": 5.0}, {"char": "{", "name": "Klamra lewa", "width": 5.0}, {"char": "|", "name": "Ściana", "width": 3.0}, {"char": "}", "name": "Klamra prawa", "width": 5.0}, {"char": "~", "name": "Tylda", "width": 9.0}]}, "fonts": {"runescript.ttf": "data:font/ttf;base64,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", "runescript-monospace.ttf": "data:font/ttf;base64,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"}};</script>
+</head>
+<body>
+  <section class="composer">
+    <textarea id="input" spellcheck="false" autofocus placeholder="Wpisz tekst…"></textarea>
+    <div class="gutter gutter-x" id="gutter-x" role="separator" aria-orientation="vertical"
+         title="Przeciągnij, aby zmienić szerokość panelu"></div>
+    <nav class="switcher" aria-label="Ustawienia podglądu">
+      <div class="group">
+        <span class="label">Czcionka</span>
+        <div class="grid2" id="font-options"></div>
+      </div>
+
+      <!-- suwaki buduje skrypt (patrz slider()) — markup każdego jest identyczny -->
+      <div class="group" id="size-slider"></div>
+      <div class="group" id="lh-slider"></div>
+      <div class="group" id="ls-slider"></div>
+    </nav>
+  </section>
+
+  <div class="gutter gutter-y" id="gutter-y" role="separator" aria-orientation="horizontal"
+       title="Przeciągnij, aby zmienić wysokość sekcji tekstowej"></div>
+
+  <section class="sheet">
+    <div class="grid" id="grid"><p class="empty">Wczytywanie znaków…</p></div>
+  </section>
+
+  <script>
+    const bust = Date.now();
+
+    // Strona statyczna (docs/index.html generowane przez build_font.py) niesie
+    // fonty i listę znaków wbudowane w HTML — wtedy nie ma czego pobierać.
+    // W trybie deweloperskim tego obiektu nie ma i lecimy fetchem do public/.
+    const EMBED = window.__RUNESCRIPT_EMBED__ || null;
+
+    // --- regulowane proporcje panelu (zapisywane w localStorage) -------------
+    const LAYOUT_KEY = "runescript.layout";
+    const PANEL_W_DEFAULT = 350;   // px; odpowiednik --panel-w w CSS
+    const layout = { panelW: PANEL_W_DEFAULT, composerH: Math.round(innerHeight / 3) };
+    try {
+      Object.assign(layout, JSON.parse(localStorage.getItem(LAYOUT_KEY)) || {});
+    } catch { /* uszkodzony wpis — zostają wartości domyślne */ }
+
+    const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+
+    function applyLayout() {
+      // klamrowanie przy każdym zastosowaniu, więc zmiana rozmiaru okna
+      // nie może zepchnąć panelu ani sekcji tekstowej poza ekran
+      layout.panelW = clamp(layout.panelW, 200, innerWidth - 260);
+      layout.composerH = clamp(layout.composerH, 90, innerHeight - 140);
+      const s = document.documentElement.style;
+      s.setProperty("--panel-w", layout.panelW + "px");
+      s.setProperty("--composer-h", layout.composerH + "px");
+    }
+    const saveLayout = () => localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+
+    /** Wiąże uchwyt z wymiarem: onDrag przelicza pozycję kursora na nowy rozmiar. */
+    function resizable(gutter, axis, onDrag) {
+      gutter.addEventListener("pointerdown", e => {
+        e.preventDefault();
+        gutter.setPointerCapture(e.pointerId);
+        gutter.classList.add("active");
+        document.body.classList.add("dragging", "dragging-" + axis);
+
+        const move = ev => { onDrag(ev); applyLayout(); };
+        const up = ev => {
+          gutter.releasePointerCapture(ev.pointerId);
+          gutter.classList.remove("active");
+          document.body.classList.remove("dragging", "dragging-" + axis);
+          gutter.removeEventListener("pointermove", move);
+          gutter.removeEventListener("pointerup", up);
+          gutter.removeEventListener("pointercancel", up);
+          saveLayout();
+        };
+        gutter.addEventListener("pointermove", move);
+        gutter.addEventListener("pointerup", up);
+        gutter.addEventListener("pointercancel", up);
+      });
+      // dwuklik przywraca domyślną proporcję tego wymiaru
+      gutter.addEventListener("dblclick", () => {
+        if (axis === "x") layout.panelW = PANEL_W_DEFAULT;
+        else layout.composerH = Math.round(innerHeight / 3);
+        applyLayout();
+        saveLayout();
+      });
+    }
+
+    // panel przylega do prawej krawędzi, sekcja tekstowa do górnej
+    resizable(document.getElementById("gutter-x"), "x",
+              e => { layout.panelW = innerWidth - e.clientX; });
+    resizable(document.getElementById("gutter-y"), "y",
+              e => { layout.composerH = e.clientY; });
+
+    addEventListener("resize", applyLayout);
+    applyLayout();
+
+    // --- ładowanie fontów zawsze ze świeżego pliku (omijamy cache przeglądarki) ---
+    [["RuneScript", "runescript.ttf"],
+     ["RuneScript Monospace", "runescript-monospace.ttf"]].forEach(([family, file]) => {
+      const src = EMBED ? EMBED.fonts[file] : `${file}?t=${bust}`;
+      new FontFace(family, `url(${src}) format("truetype")`).load()
+        .then(f => document.fonts.add(f))
+        .catch(err => console.error("Nie udało się wczytać fontu", family, err));
+    });
+
+    // --- panel sterowania podglądem -----------------------------------------
+    const FONTS = [
+      ["Arial",                'Arial, Helvetica, sans-serif'],
+      ["Consolas",             'Consolas, "Courier New", monospace'],
+      ["RuneScript",           '"RuneScript", monospace'],
+      ["RuneScript Monospace", '"RuneScript Monospace", monospace'],
+    ];
+    // wartości suwaków — suwak indeksuje listę, więc nie ustawia wartości pośrednich
+    const SIZES = [12, 16, 24, 42, 64];        // px
+    const LINE_HEIGHTS = [1, 1.2, 1.35, 1.5];
+    // 0 = sam odstęp wbudowany w czcionkę (LETTER_SPACE_PX w build_font.py);
+    // pozostałe wartości dokładają światło ponad to. W em, więc skalują się z rozmiarem.
+    const LETTER_SPACINGS = [0, 0.1, 0.2, 0.35, 0.5];
+
+    const input = document.getElementById("input");
+
+    /** Grupa przycisków działających jak radio — zwraca funkcję ustawiającą wybór. */
+    function buttonGroup(container, items, apply) {
+      const buttons = items.map(([label, value]) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = label;
+        b.setAttribute("aria-pressed", "false");
+        b.addEventListener("click", () => select(b, value));
+        container.appendChild(b);
+        return b;
+      });
+      function select(chosen, value) {
+        apply(value);
+        buttons.forEach(b => b.setAttribute("aria-pressed", String(b === chosen)));
+      }
+      return index => select(buttons[index], items[index][1]);
+    }
+
+    const selectFont = buttonGroup(
+      document.getElementById("font-options"), FONTS,
+      stack => { input.style.fontFamily = stack; });
+
+    /** Suwak skokowy po liście wartości. `label` opisuje wartość pod odczytem
+     *  i podziałką, `tick` (opcjonalnie) skraca ją do podziałki. */
+    function slider(container, title, values, { apply, label, tick, start = 0 }) {
+      const short = tick || label;
+
+      const readout = document.createElement("b");
+      const caption = document.createElement("span");
+      caption.className = "label";
+      caption.append(title + " ", readout);
+
+      const range = document.createElement("input");
+      range.type = "range";
+      range.min = "0";
+      range.max = String(values.length - 1);
+      range.step = "1";
+      range.value = String(start);
+      range.setAttribute("aria-label", title);
+
+      const ticks = document.createElement("div");
+      ticks.className = "ticks";
+      ticks.append(...values.map(v =>
+        Object.assign(document.createElement("span"), { textContent: short(v) })));
+
+      container.append(caption, range, ticks);
+
+      function update() {
+        const v = values[Number(range.value)];
+        readout.textContent = label(v);
+        apply(v);
+      }
+      range.addEventListener("input", update);
+      update();
+    }
+
+    slider(document.getElementById("size-slider"), "Rozmiar", SIZES, {
+      start: SIZES.indexOf(42),
+      label: px => px + " px",
+      tick: px => String(px),
+      apply: px => { input.style.fontSize = px + "px"; },
+    });
+
+    slider(document.getElementById("lh-slider"), "Interlinia", LINE_HEIGHTS, {
+      label: lh => String(lh),
+      apply: lh => { input.style.lineHeight = String(lh); },
+    });
+
+    slider(document.getElementById("ls-slider"), "Odstęp znaków", LETTER_SPACINGS, {
+      label: ls => ls + " em",
+      tick: ls => (ls ? String(ls) : "0"),
+      apply: ls => { input.style.letterSpacing = ls + "em"; },
+    });
+
+    // stan początkowy (suwaki ustawiają się same przy tworzeniu)
+    selectFont(2);           // RuneScript Regular
+
+    // --- grid ze wszystkimi znakami czcionki --------------------------------
+    (EMBED ? Promise.resolve(EMBED.characters) : fetch(`characters.json?t=${bust}`).then(r => r.json()))
+      .then(data => {
+        // 'glyphs' niesie nazwę runy; starsze characters.json ma tylko listę znaków
+        const glyphs = data.glyphs
+          || (data.characters || []).map(char => ({ char, name: "" }));
+        renderGrid(glyphs);
+        input.value = glyphs.map(g => g.char).join("");
+      })
+      .catch(err => {
+        console.error("Nie udało się wczytać characters.json", err);
+        document.getElementById("grid").innerHTML =
+          '<p class="empty">Błąd: brak characters.json — uruchom <code>python build_font.py</code></p>';
+      });
+
+    function renderGrid(glyphs) {
+      const grid = document.getElementById("grid");
+      grid.textContent = "";
+      for (const g of glyphs) {
+        const cp = "U+" + g.char.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
+        const cell = document.createElement("div");
+        cell.className = "cell";
+        cell.title = `${g.char}  ${cp}`;
+
+        const row = document.createElement("div");
+        row.className = "glyphs";
+        for (const cls of ["rune", "plain"]) {
+          const box = document.createElement("div");
+          box.className = cls;
+          box.textContent = g.char;
+          row.appendChild(box);
+        }
+
+        const caption = document.createElement("div");
+        caption.className = "caption";
+        caption.textContent = g.name || cp;
+
+        cell.append(row, caption);
+        grid.appendChild(cell);
+      }
+    }
+  </script>
+</body>
+</html>

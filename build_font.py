@@ -68,10 +68,9 @@ PUBLIC_DIR = os.path.join(HERE, "public")
 OUT = os.path.join(PUBLIC_DIR, "runescript.ttf")                 # wariant proporcjonalny
 OUT_MONO = os.path.join(PUBLIC_DIR, "runescript-monospace.ttf")  # wariant monospace
 
-# Strona statyczna dla GitHub Pages (Source: branch main, katalog /docs).
-# Jeden samowystarczalny plik: fonty i lista znaków wklejone w HTML, więc
-# nie ma żadnych pobrań w runtime i nie trzeba wersjonować artefaktów binarnych.
-DOCS_DIR = os.path.join(HERE, "docs")
+# Strona statyczna dla GitHub Pages ląduje w dist/ — jeden samowystarczalny plik:
+# fonty i lista znaków wklejone w HTML, więc nie ma żadnych pobrań w runtime.
+DIST_DIR = os.path.join(HERE, "dist")
 TEMPLATE_HTML = os.path.join(HERE, "index.html")
 
 FNAME_RE = re.compile(
@@ -664,7 +663,7 @@ def main(mono_px=MONO_PX, letter_space=LETTER_SPACE_PX, y_shift=Y_SHIFT_PX,
     write_characters_json(files, os.path.join(PUBLIC_DIR, "characters.json"))
 
     # strona statyczna dla GitHub Pages — wszystko wbudowane w jeden plik:
-    write_static_page(files, os.path.join(DOCS_DIR, "index.html"))
+    write_static_page(files, os.path.join(DIST_DIR, "index.html"))
 
 
 if __name__ == "__main__":
