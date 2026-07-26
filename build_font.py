@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Buduje runescript.ttf z plików svg/Letter=..., Name=..., Width=....svg
+"""Buduje czcionki RuneScript z plików svg/Letter=..., Name=..., Width=....svg
 
-Wszystkie glify to outline (ścieżki ze stroke). Stroke jest ekspandowany do konturu
-za pomocą shapely. Zachowujemy pozycję Y liter względem viewboxa (globalna,
-jednakowa transformacja), a advance width bierzemy z parametru Width z nazwy pliku.
+Wszystkie glify to outline (ścieżki ze stroke). Obrys rozwijany jest do konturu
+własnym strokerem o STAŁEJ TOPOLOGII: liczba konturów i punktów zależy wyłącznie
+od źródłowej ścieżki, nigdy od grubości obrysu. To warunek konieczny fontu
+variable — mastery muszą być interpolowalne punkt po punkcie (patrz stroke_path).
+
+Zachowujemy pozycję Y liter względem viewboxa (globalna, jednakowa transformacja),
+a advance width bierzemy z parametru Width z nazwy pliku.
+
+Artefakty: runescript.ttf, runescript-monospace.ttf (statyczne) oraz
+runescript-variable.ttf z osią wagi wght.
 """
 
 import glob
+import math
 import os
 import re
 
@@ -15,16 +23,6 @@ from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.recordingPen import RecordingPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.svgLib.path import parse_path
-
-try:
-    from shapely.geometry import LineString, LinearRing, Polygon, MultiPolygon
-    from shapely.ops import unary_union
-except ImportError:
-    raise SystemExit(
-        "Brak biblioteki shapely — zainstaluj:\n"
-        "  pip install shapely\n"
-        "Shapely jest wymagana do ekspansji stroke do konturu."
-    )
 
 # --- stałe układu współrzędnych -------------------------------------------------
 UPM = 1400          # units per em
@@ -39,7 +37,7 @@ SPACE_PX = 5        # advance spacji w px
 #   = 1.0  -> glify sąsiednich wierszy stykają się końcami,
 #   > 1.0  -> glify nachodzą na sąsiedni wiersz (o (ratio-1) em).
 # Skaluje wszystko jednorodnie — także advance, więc proporcje liter zostają.
-INK_EM_RATIO = 1.1
+INK_EM_RATIO = 1.15
 
 SCALE = 100         # jednostek fontu na 1px viewboxa; przeliczane w resolve_metrics()
 
@@ -55,6 +53,17 @@ _baseline = float(VIEWBOX)   # domyślnie dół viewboxa; nadpisywane po wczytan
 ASCENT = UPM                 # baseline -> najwyższy ink
 DESCENT = 0                  # baseline -> najniższy ink (zwykle 0)
 
+# --- oś wagi fontu variable ------------------------------------------------------
+# Mastery bierzemy WPROST z plików: każdy SVG niesie własne stroke-width dla swojej
+# wagi (Weight= w nazwie pliku). Nic nie skalujemy — to warunek postawiony wprost:
+# dana waga ma być odwzorowaniem 1:1 swojego pliku źródłowego.
+# Nazwy stylów wg skali OpenType; wagi wykrywamy z nazw plików.
+WEIGHT_STYLES = {
+    100: "Thin", 200: "ExtraLight", 300: "Light", 400: "Regular", 500: "Medium",
+    600: "SemiBold", 700: "Bold", 800: "ExtraBold", 900: "Black",
+}
+DEFAULT_WEIGHT = 400   # master domyślny osi i źródło wariantów statycznych
+
 # --- domyślne parametry rozstawu (można nadpisać flagami CLI) --------------------
 LETTER_SPACE_PX = 0  # całkowity odstęp doliczany do advance litery (px); dzielony po połowie L/P
 MONO_PX = 9          # szerokość komórki w wariancie monospace (px)
@@ -65,6 +74,13 @@ SVG_DIR = os.path.join(HERE, "svg")
 FONTS_DIR = os.path.join(HERE, "fonts")
 OUT = os.path.join(FONTS_DIR, "runescript.ttf")                 # wariant proporcjonalny
 OUT_MONO = os.path.join(FONTS_DIR, "runescript-monospace.ttf")  # wariant monospace
+OUT_VAR = os.path.join(FONTS_DIR, "runescript-variable.ttf")    # oś wagi wght
+OUT_MONO_VAR = os.path.join(FONTS_DIR, "runescript-monospace-variable.ttf")
+
+# Komplet wag zapisany statycznie — po jednym pliku na wagę i wariant. Przydaje się
+# tam, gdzie font variable nie wchodzi w grę (starsze systemy, część edytorów,
+# osadzanie w dokumentach).
+STATIC_DIR = os.path.join(HERE, "static")
 
 # Strona statyczna dla GitHub Pages ląduje w docs/ (Source: branch main, katalog
 # /docs) — jeden samowystarczalny plik:
@@ -73,7 +89,8 @@ DOCS_DIR = os.path.join(HERE, "docs")
 TEMPLATE_HTML = os.path.join(HERE, "index.html")
 
 FNAME_RE = re.compile(
-    r"Letter=(?P<letter>.+?),\s*Name=(?P<name>.*?),\s*Width=(?P<width>[\d.]+)\.svg$")
+    r"Letter=(?P<letter>.+?),\s*Name=(?P<name>.*?),\s*Width=(?P<width>[\d.]+)"
+    r",\s*Weight=(?P<weight>\d+)\.svg$")
 PATH_TAG_RE = re.compile(r"<path\b[^>]*>", re.DOTALL)   # każdy element <path ...>
 D_ATTR_RE = re.compile(r'\bd="([^"]+)"', re.DOTALL)     # atrybut d wewnątrz taga
 STROKE_WIDTH_RE = re.compile(r'\bstroke-width="([^"]+)"')
@@ -90,10 +107,6 @@ STROKE_LINEJOIN = "miter"   # SVG: ostre narożniki (nie zaokrąglone!)
 STROKE_LINECAP = "butt"     # SVG: końce ścięte płasko
 STROKE_MITERLIMIT = 4.0     # SVG: stroke-miterlimit="4"
 
-# mapowanie nazw SVG -> stałe shapely (buffer join_style / cap_style)
-_JOIN_STYLE = {"miter": 2, "round": 1, "bevel": 3}
-_CAP_STYLE = {"butt": 2, "round": 1, "square": 3}
-
 
 def to_font(x, y):
     """SVG (y w dół, origin lewy-górny) -> font (y w górę). Baseline na svg-y=_baseline,
@@ -101,12 +114,25 @@ def to_font(x, y):
     return ((x - LEFT_PAD) * SCALE, (_baseline - y) * SCALE)
 
 
-def ink_y_bounds(files):
-    """Zwraca (min_y, max_y) współrzędnych svg-y ze wszystkich ścieżek — pionowy zasięg inku.
+def group_by_weight(files):
+    """{waga: [ścieżki plików]} — po jednym komplecie glifów na wagę."""
+    groups = {}
+    for path in files:
+        m = FNAME_RE.search(os.path.basename(path))
+        if not m:
+            print(f"POMIJAM (zła nazwa, brak Weight=?): {os.path.basename(path)}")
+            continue
+        groups.setdefault(int(m.group("weight")), []).append(path)
+    return dict(sorted(groups.items()))
 
-    Obrys rozlewa się o pół grubości poza linię środkową ścieżki, więc zasięg
-    surowych punktów rozszerzamy o stroke-width/2 — inaczej baseline wypadłby
-    w środku dolnej kreski zamiast pod nią."""
+
+def ink_y_bounds(files):
+    """Zwraca (min_y, max_y) svg-y faktycznego obrysu — pionowy zasięg inku.
+
+    Mierzymy wyliczony kontur, a nie punkty ścieżki powiększone o pół grubości:
+    złącze mitre potrafi wystawać poza tę granicę nawet kilkukrotnie, a przy
+    grubym obrysie (master Bold) taki błąd oznaczałby przycięcie glifu przez
+    usWinAscent/usWinDescent."""
     ymin = ymax = None
     for path in files:
         with open(path, "r", encoding="utf-8") as fh:
@@ -115,14 +141,17 @@ def ink_y_bounds(files):
             dm = D_ATTR_RE.search(tag)
             if not dm:
                 continue
-            half = stroke_params(tag)[0] / 2.0
-            rec = RecordingPen()
-            parse_path(dm.group(1), rec)
-            for _op, args in rec.value:
-                for (_x, y) in args:
-                    lo, hi = y - half, y + half
-                    ymin = lo if ymin is None else min(ymin, lo)
-                    ymax = hi if ymax is None else max(ymax, hi)
+            sw, limit = stroke_params(tag)
+            for pts, closed in parse_subpaths(dm.group(1)):
+                pts = _dedup(pts)
+                if closed and len(pts) > 2 and pts[0] == pts[-1]:
+                    pts = pts[:-1]
+                if len(pts) < 2:
+                    continue
+                for contour in stroke_pieces(pts, closed, sw, limit):
+                    for (_x, y) in contour:
+                        ymin = y if ymin is None else min(ymin, y)
+                        ymax = y if ymax is None else max(ymax, y)
     return ymin, ymax
 
 
@@ -156,20 +185,32 @@ def resolve_metrics(files, y_shift=Y_SHIFT_PX, ink_em_ratio=INK_EM_RATIO):
           f"o {abs(overlap - 1) * 100:.1f}% em)")
 
 
+def vertical_extent(files):
+    """(ascent, descent) w jednostkach fontu dla podanego kompletu plików (jednej wagi).
+
+    Używa USTALONYCH już SCALE i _baseline, więc cięższa waga zmienia tylko zasięg
+    pionowy — nie skalę rysunku. Dzięki temu mastery fontu variable różnią się
+    grubością kreski, a nie wielkością liter."""
+    ymin, ymax = ink_y_bounds(files)
+    if ymin is None:
+        return ASCENT, DESCENT
+    return (round((_baseline - ymin) * SCALE),
+            round(max(0.0, ymax - _baseline) * SCALE))
+
+
 def stroke_params(tag):
     """Czyta parametry obrysu z atrybutów tagu <path>, z domyślnymi wartościami SVG.
-    Zwraca (width_px, join_style, cap_style, mitre_limit) — już w stałych shapely."""
+    Zwraca (width_px, mitre_limit).
+
+    Obsługujemy wyłącznie miter + butt (domyślne w SVG). Zaokrąglone złącza czy
+    zakończenia wymagałyby wstawiania łuków o liczbie punktów zależnej od promienia,
+    co zerwałoby interpolowalność masterów — dlatego zamiast po cichu je przybliżać,
+    ostrzegamy."""
     m = STROKE_WIDTH_RE.search(tag)
     try:
         width = float(m.group(1)) if m else STROKE_WIDTH_PX
     except ValueError:
         width = STROKE_WIDTH_PX
-
-    m = STROKE_LINEJOIN_RE.search(tag)
-    join = _JOIN_STYLE.get(m.group(1).strip() if m else STROKE_LINEJOIN, _JOIN_STYLE["miter"])
-
-    m = STROKE_LINECAP_RE.search(tag)
-    cap = _CAP_STYLE.get(m.group(1).strip() if m else STROKE_LINECAP, _CAP_STYLE["butt"])
 
     m = STROKE_MITERLIMIT_RE.search(tag)
     try:
@@ -177,7 +218,14 @@ def stroke_params(tag):
     except ValueError:
         limit = STROKE_MITERLIMIT
 
-    return width, join, cap, limit
+    for regex, default, what in ((STROKE_LINEJOIN_RE, STROKE_LINEJOIN, "stroke-linejoin"),
+                                 (STROKE_LINECAP_RE, STROKE_LINECAP, "stroke-linecap")):
+        m = regex.search(tag)
+        if m and m.group(1).strip() != default:
+            print(f"  UWAGA: {what}=\"{m.group(1).strip()}\" nie jest obsługiwane "
+                  f"(używam {default!r}) — łuki zerwałyby interpolację fontu variable")
+
+    return width, limit
 
 
 def _flatten(p0, args, op, steps=8):
@@ -237,7 +285,8 @@ def parse_subpaths(d):
 
 
 def _dedup(points):
-    """Usuwa kolejne powtórzone punkty — shapely nie lubi zerowej długości segmentów."""
+    """Usuwa kolejne powtórzone punkty — segment zerowej długości nie ma kierunku,
+    więc nie dałoby się na nim wyznaczyć normalnej do odsunięcia obrysu."""
     out = [points[0]]
     for p in points[1:]:
         if p != out[-1]:
@@ -245,61 +294,119 @@ def _dedup(points):
     return out
 
 
-def _rings_to_contours(geom):
-    """Wyciąga obwiednie i otwory z Polygon/MultiPolygon, przelicza do przestrzeni fontu
-    i ustawia kierunki pod regułę nonzero (obwiednia CCW, otwór CW)."""
-    polys = []
-    if isinstance(geom, Polygon):
-        polys = [geom]
-    elif isinstance(geom, MultiPolygon):
-        polys = list(geom.geoms)
-    elif hasattr(geom, "geoms"):   # GeometryCollection — bierzemy tylko wielokąty
-        polys = [g for g in geom.geoms if isinstance(g, Polygon)]
-
-    contours = []
-    for poly in polys:
-        for ring, want_ccw in [(poly.exterior, True)] + [(r, False) for r in poly.interiors]:
-            pts = [to_font(*pt) for pt in ring.coords[:-1]]   # coords[-1] == coords[0]
-            if len(pts) < 3:
-                continue
-            # to_font odwraca oś Y, więc orientacja z shapely nie jest miarodajna
-            if (signed_area(pts) > 0) != want_ccw:
-                pts.reverse()
-            contours.append(pts)
-    return contours
+def _unit(p0, p1):
+    """Znormalizowany kierunek odcinka albo None dla odcinka zerowej długości."""
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    length = math.hypot(dx, dy)
+    return (dx / length, dy / length) if length > 1e-12 else None
 
 
-def extract_contours(d, stroke_width=None, join_style=None, cap_style=None, mitre_limit=None):
+def stroke_pieces(pts, closed, stroke_width, mitre_limit):
+    """Rozkłada obrys łamanej na WYPUKŁE kawałki (układ SVG, y w dół).
+
+    Każdy segment daje prostokąt, każde złącze — klin (mitre albo bevel).
+    Suma tych kawałków pod regułą nonzero to dokładnie obszar, który SVG maluje
+    jako stroke: prostokąty pokrywają kreski, kliny domykają narożniki.
+
+    Dlaczego nie jeden kontur „obwiednia + otwór": przy ostrym zagięciu punkt mitre
+    po WEWNĘTRZNEJ stronie wybiega daleko poza narożnik i wycina w kresce wcięcie.
+    Rozkład na wypukłe kawałki nie ma tego problemu, bo żaden kawałek nie sięga
+    poza swój segment — a przy okazji znikają wszystkie przypadki brzegowe: mały
+    romb wychodzi pełny, bo prostokąty się na siebie nakładają, a ścieżka
+    krzyżująca się ze sobą (Dagaz) nie wymaga osobnej obsługi.
+
+    Liczba kawałków i punktów zależy WYŁĄCZNIE od kształtu ścieżki (wybór
+    mitre/bevel to funkcja samego kąta), więc mastery o różnych grubościach
+    pozostają interpolowalne punkt po punkcie.
+
+    Kawałki wychodzą w jednolitej orientacji (ujemne pole w układzie SVG), którą
+    ustalamy z kierunku skrętu — a nie z pomiaru pola gotowego kawałka, bo przy
+    złączu bliskim prostemu pole dąży do zera i pomiar bywa niestabilny."""
+    half = stroke_width / 2.0
+    n = len(pts)
+    seg_count = n if closed else n - 1
+    dirs = [_unit(pts[i], pts[(i + 1) % n]) for i in range(seg_count)]
+
+    pieces = []
+
+    # prostokąt na każdy segment (zakończenia butt powstają same: prostokąt
+    # kończy się równo na końcu segmentu)
+    for i, direction in enumerate(dirs):
+        if direction is None:
+            continue
+        nx, ny = -direction[1] * half, direction[0] * half
+        (x0, y0), (x1, y1) = pts[i], pts[(i + 1) % n]
+        pieces.append([(x0 + nx, y0 + ny), (x1 + nx, y1 + ny),
+                       (x1 - nx, y1 - ny), (x0 - nx, y0 - ny)])
+
+    # klin na każdym złączu wewnętrznym (dla ścieżki zamkniętej — na każdym)
+    joints = range(n) if closed else range(1, n - 1)
+    for i in joints:
+        d1 = dirs[(i - 1) % seg_count] if closed else dirs[i - 1]
+        d2 = dirs[i % seg_count] if closed else dirs[i]
+        if d1 is None or d2 is None:
+            continue
+        cross = d1[0] * d2[1] - d1[1] * d2[0]
+        # klin siada po ZEWNĘTRZNEJ stronie skrętu; po wewnętrznej prostokąty
+        # sąsiednich segmentów i tak już na siebie zachodzą
+        side = -1.0 if cross > 0 else 1.0
+        n1 = (-d1[1] * side, d1[0] * side)
+        n2 = (-d2[1] * side, d2[0] * side)
+        px, py = pts[i]
+        a = (px + n1[0] * half, py + n1[1] * half)
+        b = (px + n2[0] * half, py + n2[1] * half)
+
+        mx, my = n1[0] + n2[0], n1[1] + n2[1]
+        length = math.hypot(mx, my)
+        if length < 1e-12:
+            apex = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)      # zawrócenie o 180°
+        else:
+            mx, my = mx / length, my / length
+            k = 1.0 / max(mx * n1[0] + my * n1[1], 1e-12)
+            if k <= mitre_limit:
+                apex = (px + mx * half * k, py + my * half * k)
+            else:
+                # przekroczony limit -> bevel, czyli wierzchołek na krawędzi AB
+                # (SVG robi dokładnie to samo); liczba punktów bez zmian
+                apex = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+
+        wedge = [(px, py), a, apex, b]
+        if cross > 0:
+            wedge.reverse()          # jednolita orientacja z prostokątami
+        pieces.append(wedge)
+
+    return pieces
+
+
+def stroke_path(pts, closed, stroke_width, mitre_limit):
+    """Kawałki obrysu przeliczone do przestrzeni fontu.
+
+    to_font odwraca oś Y, więc kawałki ujemne w układzie SVG stają się dodatnie
+    (CCW) — czyli takie, jakich oczekuje reguła nonzero w TrueType."""
+    return [[to_font(*p) for p in piece]
+            for piece in stroke_pieces(pts, closed, stroke_width, mitre_limit)]
+
+
+def extract_contours(d, stroke_width=None, mitre_limit=None):
     """Zamienia obrys (stroke) ścieżki SVG na wypełnione kontury w przestrzeni fontu.
 
-    Każdy subpath buforowany jest osobno (z geometrią złączy jak w SVG: mitre,
-    butt caps), a wyniki sumowane przez unary_union — nakładające się kreski
-    zlewają się w jeden kształt dokładnie tak, jak renderuje je przeglądarka."""
+    Grubość bierze się wprost z atrybutu stroke-width danego pliku — każda waga ma
+    własny komplet SVG, więc nie ma tu żadnego skalowania."""
     if stroke_width is None:
         stroke_width = STROKE_WIDTH_PX
-    if join_style is None:
-        join_style = _JOIN_STYLE[STROKE_LINEJOIN]
-    if cap_style is None:
-        cap_style = _CAP_STYLE[STROKE_LINECAP]
     if mitre_limit is None:
         mitre_limit = STROKE_MITERLIMIT
 
-    half = stroke_width / 2.0
-    pieces = []
+    width = stroke_width
+    contours = []
     for pts, closed in parse_subpaths(d):
         pts = _dedup(pts)
-        if closed and pts[0] != pts[-1]:
-            pts.append(pts[0])          # domknięcie: złącze mitre zamiast dwóch capów
+        if closed and len(pts) > 2 and pts[0] == pts[-1]:
+            pts = pts[:-1]               # pierścień bez powtórzonego punktu startowego
         if len(pts) < 2:
             continue
-        # LinearRing dla subpathów zamkniętych — złącze w punkcie startowym też jest mitre
-        geom = LinearRing(pts) if (closed and len(pts) >= 4) else LineString(pts)
-        pieces.append(geom.buffer(half, cap_style=cap_style,
-                                  join_style=join_style, mitre_limit=mitre_limit))
-
-    if not pieces:
-        return []
-    return _rings_to_contours(unary_union(pieces))
+        contours.extend(stroke_path(pts, closed, width, mitre_limit))
+    return contours
 
 
 def signed_area(pts):
@@ -311,53 +418,6 @@ def signed_area(pts):
         x1, y1 = pts[(i + 1) % n]
         a += x0 * y1 - x1 * y0
     return a / 2.0
-
-
-def point_in_polygon(pt, poly):
-    """Ray casting. Zakładamy wielokąty proste (bez samoprzecięć)."""
-    x, y = pt
-    inside = False
-    n = len(poly)
-    j = n - 1
-    for i in range(n):
-        xi, yi = poly[i]
-        xj, yj = poly[j]
-        if (yi > y) != (yj > y):
-            xints = (xj - xi) * (y - yi) / (yj - yi) + xi
-            if x < xints:
-                inside = not inside
-        j = i
-    return inside
-
-
-def normalize_winding(contours, even_odd):
-    """Ustawia kierunki konturów pod regułę nonzero (TrueType).
-
-    even_odd=True  (fill-rule="evenodd" w źródle): odtwarzamy semantykę even-odd —
-        kontury o parzystej głębokości zagnieżdżenia -> CCW, nieparzystej (dziury) -> CW.
-    even_odd=False (domyślny nonzero): źródło ma już poprawne kierunki dla nonzero,
-        więc zachowujemy autorską orientację bez zmian."""
-    if not even_odd:
-        return contours
-    fixed = []
-    for i, c in enumerate(contours):
-        if len(c) < 3:
-            fixed.append(c)
-            continue
-        # głębokość = w ilu innych konturach leży reprezentatywny punkt
-        p = c[0]
-        depth = 0
-        for j, other in enumerate(contours):
-            if j == i or len(other) < 3:
-                continue
-            if point_in_polygon(p, other):
-                depth += 1
-        want_ccw = (depth % 2 == 0)
-        is_ccw = signed_area(c) > 0
-        if want_ccw != is_ccw:
-            c = list(reversed(c))
-        fixed.append(c)
-    return fixed
 
 
 def build_glyph(contours):
@@ -420,11 +480,23 @@ def resolve_letter(token):
     return None
 
 
-def build_font(svg_files, out_path, family_name, monospace, mono_px, letter_space):
-    """Buduje jeden wariant fontu z listy plików SVG i zapisuje go do out_path.
+def build_font(svg_files, out_path, family_name, monospace, mono_px, letter_space,
+               style_name="Regular", weight_class=400,
+               ascent=None, descent=None, verbose=True):
+    """Buduje jeden wariant fontu z listy plików SVG. Zwraca gotowy TTFont;
+    zapisuje go dodatkowo do out_path, o ile out_path nie jest None.
 
     family_name musi być unikalne per wariant, żeby oba pliki dało się jednocześnie
-    zainstalować w systemie bez konfliktu (np. 'RuneScript' vs 'RuneScript Monospace')."""
+    zainstalować w systemie bez konfliktu (np. 'RuneScript' vs 'RuneScript Monospace').
+
+    svg_files to komplet plików JEDNEJ wagi — grubość obrysu niesie sam plik.
+    ascent/descent pozwalają narzucić wspólne metryki pionowe wszystkim masterom
+    (domyślnie globalne ASCENT/DESCENT z resolve_metrics)."""
+    if ascent is None:
+        ascent = ASCENT
+    if descent is None:
+        descent = DESCENT
+
     glyphs = {}          # glyphName -> TTGlyph
     advances = {}        # glyphName -> advance width (units)
     cmap = {}            # codepoint -> glyphName
@@ -442,9 +514,12 @@ def build_font(svg_files, out_path, family_name, monospace, mono_px, letter_spac
     order.append("space")
 
     mode = f"MONOSPACE {mono_px}px" if monospace else "proporcjonalny"
-    print(f"\n=== {family_name} — {mode}, letter-space {letter_space}px -> {os.path.basename(out_path)} ===")
-    print(f"{'litera':6} {'Width':>6} {'advance':>8} {'kontury':>8}")
-    print("-" * 32)
+    if verbose:
+        target = os.path.basename(out_path) if out_path else "(w pamięci)"
+        print(f"\n=== {family_name} {style_name} — {mode}, "
+              f"letter-space {letter_space}px -> {target} ===")
+        print(f"{'litera':6} {'Width':>6} {'advance':>8} {'kontury':>8}")
+        print("-" * 32)
 
     for path in svg_files:
         base = os.path.basename(path)
@@ -468,10 +543,9 @@ def build_font(svg_files, out_path, family_name, monospace, mono_px, letter_spac
             dm = D_ATTR_RE.search(tag)
             if not dm:
                 continue
-            sw, join, cap, limit = stroke_params(tag)
+            sw, limit = stroke_params(tag)
             # kierunki konturów ustawia już extract_contours (obwiednia CCW / otwór CW)
             contours.extend(extract_contours(dm.group(1), stroke_width=sw,
-                                             join_style=join, cap_style=cap,
                                              mitre_limit=limit))
         if not contours:
             print(f"POMIJAM (brak <path d>): {base}")
@@ -493,7 +567,8 @@ def build_font(svg_files, out_path, family_name, monospace, mono_px, letter_spac
         if letter.isalpha():
             cmap[ord(letter.lower())] = glyph_name  # mała litera -> ta sama runa
 
-        print(f"{letter:6} {width_px:6.1f} {advances[glyph_name]:8d} {len(contours):8d}")
+        if verbose:
+            print(f"{letter:6} {width_px:6.1f} {advances[glyph_name]:8d} {len(contours):8d}")
 
     # --- złożenie fontu ---------------------------------------------------------
     ps_name = family_name.replace(" ", "")
@@ -515,36 +590,149 @@ def build_font(svg_files, out_path, family_name, monospace, mono_px, letter_spac
         metrics[name] = (adv, xmin)
     fb.setupHorizontalMetrics(metrics)
 
-    fb.setupHorizontalHeader(ascent=ASCENT, descent=-DESCENT)
+    fb.setupHorizontalHeader(ascent=ascent, descent=-descent)
+
+    # Nazewnictwo wg schematu RIBBI + rodzina typograficzna (name ID 16/17).
+    # Klasyczna rodzina OpenType mieści tylko cztery style (Regular/Bold/Italic/
+    # BoldItalic), więc przy siedmiu wagach pozostałe trafiają do własnych podrodzin
+    # w name ID 1, a pełną rodzinę podaje name ID 16. Bez tego Windows pokazuje wagi
+    # jako osobne, konkurujące ze sobą czcionki i gubi je w menu wyboru kroju.
+    is_bold = style_name == "Bold"
+    ribbi = style_name in ("Regular", "Bold")
+    ps_style = style_name.replace(" ", "")
     fb.setupNameTable({
-        "familyName": family_name,
-        "styleName": "Regular",
-        "uniqueFontIdentifier": f"{family_name} Regular; 1.0",
-        "fullName": f"{family_name} Regular",
+        "familyName": family_name if ribbi else f"{family_name} {style_name}",
+        "styleName": style_name if ribbi else "Regular",
+        "typographicFamily": family_name,
+        "typographicSubfamily": style_name,
+        "uniqueFontIdentifier": f"{family_name} {style_name}; 1.0",
+        "fullName": f"{family_name} {style_name}",
         "version": "Version 1.0",
-        "psName": f"{ps_name}-Regular",
+        "psName": f"{ps_name}-{ps_style}",
     })
-    # fsSelection: bit6 REGULAR (0x40) — WYMAGANE przez Windows dla fontu Regular.
-    # Bez tego bitu Windows odrzuca plik jako "nieprawidłowy typ czcionki".
+    # fsSelection: bit5 BOLD (0x20) albo bit6 REGULAR (0x40) — jeden z nich MUSI być
+    # ustawiony, inaczej Windows odrzuca plik jako "nieprawidłowy typ czcionki".
     fb.setupOS2(
         version=4,
-        fsSelection=0x0040,        # REGULAR
-        usWeightClass=400,
+        fsSelection=0x0020 if is_bold else 0x0040,
+        usWeightClass=weight_class,
         usWidthClass=5,
         achVendID="RUNE",
         fsType=0,                  # brak ograniczeń osadzania (Installable)
-        sTypoAscender=ASCENT,
-        sTypoDescender=-DESCENT,
+        sTypoAscender=ascent,
+        sTypoDescender=-descent,
         sTypoLineGap=0,
-        usWinAscent=ASCENT,
-        usWinDescent=DESCENT,
+        usWinAscent=ascent,
+        usWinDescent=descent,
     )
-    fb.font["head"].macStyle = 0   # Regular (spójne z fsSelection)
+    fb.font["head"].macStyle = 1 if is_bold else 0   # spójne z fsSelection
     fb.setupPost()
     fb.font["post"].isFixedPitch = 1 if monospace else 0  # sygnalizuje monospace aplikacjom
-    fb.save(out_path)
-    print("-" * 32)
-    print(f"Zapisano: {out_path}  ({len(order)} glifów, {len(cmap)} kodów w cmap)")
+
+    if out_path:
+        fb.save(out_path)
+        if verbose:
+            print("-" * 32)
+            print(f"Zapisano: {out_path}  ({len(order)} glifów, {len(cmap)} kodów w cmap)")
+    return fb.font
+
+
+def build_variable_font(groups, out_path, family_name, monospace, mono_px,
+                        letter_space):
+    """Skleja mastery w jeden font variable z osią wght.
+
+    groups: {waga: [pliki SVG tej wagi]} — każdy master powstaje 1:1 ze swojego
+    kompletu plików, bez skalowania czegokolwiek. Interpolację umożliwia to, że
+    ścieżki (atrybut d) są we wszystkich wagach identyczne, a stroker wyprowadza
+    liczbę punktów wyłącznie z kształtu ścieżki."""
+    import tempfile
+    from fontTools.designspaceLib import (AxisDescriptor, DesignSpaceDocument,
+                                          InstanceDescriptor, SourceDescriptor)
+    from fontTools.otlLib.builder import buildStatTable
+    from fontTools import varLib
+
+    weights = sorted(groups)
+    default_wght = DEFAULT_WEIGHT if DEFAULT_WEIGHT in groups else weights[len(weights) // 2]
+
+    # Metryki pionowe biorą się z NAJCIĘŻSZEJ wagi i są wspólne dla wszystkich:
+    # hhea/OS/2 nie interpolują się bez tabeli MVAR, więc muszą objąć skrajną wagę,
+    # inaczej najgrubszy wariant zostałby przycięty przez usWinAscent/usWinDescent.
+    ascent, descent = vertical_extent(groups[weights[-1]])
+
+    print(f"\n=== {family_name} — VARIABLE, oś wght {weights[0]}..{weights[-1]} "
+          f"(domyślnie {default_wght}) -> {os.path.basename(out_path)} ===")
+    print(f"Metryki pionowe z wagi {weights[-1]}: ascent={ascent} descent={descent}")
+
+    doc = DesignSpaceDocument()
+    axis = AxisDescriptor()
+    axis.name, axis.tag = "Weight", "wght"
+    axis.minimum, axis.default, axis.maximum = weights[0], default_wght, weights[-1]
+    doc.addAxis(axis)
+
+    tmpdir = tempfile.mkdtemp(prefix="runescript-masters-")
+    try:
+        for wght in weights:
+            style = WEIGHT_STYLES.get(wght, str(wght))
+            font = build_font(groups[wght], None, family_name, monospace, mono_px,
+                              letter_space, style_name=style, weight_class=wght,
+                              ascent=ascent, descent=descent, verbose=False)
+            path = os.path.join(tmpdir, f"master-{wght}.ttf")
+            font.save(path)
+            contours = sum(g.numberOfContours for g in font["glyf"].glyphs.values()
+                           if g.numberOfContours > 0)
+            points = sum(len(g.getCoordinates(font["glyf"])[0])
+                         for g in font["glyf"].glyphs.values() if g.numberOfContours > 0)
+            print(f"  master {style:10} wght={wght:<4} konturów={contours:<5} punktów={points}")
+
+            source = SourceDescriptor()
+            source.path = path
+            source.name = f"master_{wght}"
+            source.location = {"Weight": wght}
+            if wght == default_wght:
+                # domyślny master oddaje reszcie tabele niezmienne (name, cmap, post...)
+                source.copyLib = source.copyInfo = True
+                source.copyGroups = source.copyFeatures = True
+            doc.addSource(source)
+
+        for wght in weights:
+            inst = InstanceDescriptor()
+            inst.familyName = family_name
+            inst.styleName = WEIGHT_STYLES.get(wght, str(wght))
+            inst.name = f"{family_name} {inst.styleName}"
+            inst.location = {"Weight": wght}
+            doc.addInstance(inst)
+
+        # optimize=False: domyślna optymalizacja IUP wyrzuca delty odtwarzalne
+        # interpolacją, dopuszczając przy tym pół jednostki błędu na punkt.
+        # Przy wymogu odwzorowania 1:1 nie chcemy tej tolerancji — a że glify są
+        # z samych narożników, IUP i tak nie miałby czego uprościć, więc nic nie
+        # kosztuje. (Reszta odchyłki instancji od mastera, ok. 0.5 jednostki na
+        # 1400 UPM, to już kwantyzacja F2Dot14 pozycji na osi — cecha formatu,
+        # nie do usunięcia. Pliki w static/ są jej wolne i są dokładne.)
+        vf, _model, _masters = varLib.build(doc, optimize=False)
+    finally:
+        for name in os.listdir(tmpdir):
+            os.remove(os.path.join(tmpdir, name))
+        os.rmdir(tmpdir)
+
+    # STAT jest wymagana przez OpenType 1.8+ — bez niej Windows i aplikacje Adobe
+    # potrafią nie pokazać osi albo źle nazwać instancje.
+    buildStatTable(vf, [{
+        "tag": "wght",
+        "name": "Weight",
+        "values": [
+            {"value": w, "name": WEIGHT_STYLES.get(w, str(w)),
+             **({"flags": 0x2} if w == default_wght else {})}
+            for w in weights
+        ],
+    }])
+
+    vf.save(out_path)
+    axes = ", ".join(f"{a.axisTag} {a.minValue:g}..{a.maxValue:g}" for a in vf["fvar"].axes)
+    print(f"Zapisano: {out_path}  (osie: {axes}; "
+          f"instancje: {len(vf['fvar'].instances)}; "
+          f"gvar dla {len(vf['gvar'].variations)} glifów)")
+    return vf
 
 
 def sorted_glyph_entries(files):
@@ -592,25 +780,79 @@ def sorted_characters(files):
     return [e["char"] for e in sorted_glyph_entries(files)]
 
 
-def write_static_page(files, out_path):
+def build_static_family(groups, ascent, descent, mono_px, letter_space):
+    """Zapisuje do static/ komplet wag statycznie — każda waga w obu wariantach.
+
+    Wszystkie dostają te same metryki pionowe, więc przełączenie wagi w tekście
+    nie rusza interlinii. Nazwy plików idą konwencją Rodzina-Styl.ttf, żeby
+    instalatory systemowe grupowały je w jedną rodzinę."""
+    os.makedirs(STATIC_DIR, exist_ok=True)
+    variants = [("RuneScript", "RuneScript", False),
+                ("RuneScript Monospace", "RuneScriptMonospace", True)]
+
+    print(f"\n=== komplet wag statycznie -> {os.path.basename(STATIC_DIR)}/ ===")
+    written = []
+    for weight in sorted(groups):
+        style = WEIGHT_STYLES.get(weight, str(weight))
+        for family, prefix, monospace in variants:
+            path = os.path.join(STATIC_DIR, f"{prefix}-{style}.ttf")
+            build_font(groups[weight], path, family, monospace=monospace,
+                       mono_px=mono_px, letter_space=letter_space,
+                       style_name=style, weight_class=weight,
+                       ascent=ascent, descent=descent, verbose=False)
+            written.append((os.path.basename(path), os.path.getsize(path)))
+
+    for name, size in written:
+        print(f"  {name:36} {size / 1024:6.1f} kB")
+    print(f"Zapisano {len(written)} plików do: {STATIC_DIR}")
+
+
+def master_stroke_widths(groups):
+    """{waga: grubość obrysu} — reprezentatywna grubość każdego mastera.
+
+    Bierzemy wartość najczęstszą w komplecie danej wagi: pojedyncza ścieżka
+    (np. diakrytyk) bywa celowo cieńsza i nie powinna reprezentować całej wagi."""
+    import collections
+    widths = {}
+    for weight, files in groups.items():
+        counter = collections.Counter()
+        for path in files:
+            with open(path, "r", encoding="utf-8") as fh:
+                svg = fh.read()
+            for tag in PATH_TAG_RE.findall(svg):
+                if D_ATTR_RE.search(tag):
+                    counter[stroke_params(tag)[0]] += 1
+        if counter:
+            widths[weight] = counter.most_common(1)[0][0]
+    return widths
+
+
+def write_static_page(groups, out_path):
     """Generuje samowystarczalny docs/index.html na bazie index.html.
 
-    Do <head> wstrzykujemy window.__RUNESCRIPT_EMBED__ z listą znaków oraz
-    fontami jako data: URL — strona działa wtedy z dowolnego katalogu i bez
-    żadnego fetcha, także otwarta prosto z dysku."""
+    Do <head> wstrzykujemy window.__RUNESCRIPT_EMBED__ z listą znaków, fontami
+    jako data: URL oraz opisem masterów — strona działa wtedy z dowolnego katalogu
+    i bez żadnego fetcha, także otwarta prosto z dysku."""
     import base64
     import json
 
-    entries = sorted_glyph_entries(files)
+    entries = sorted_glyph_entries(groups[DEFAULT_WEIGHT])
     fonts = {}
-    for name in ("runescript.ttf", "runescript-monospace.ttf"):
+    for name in ("runescript.ttf", "runescript-monospace.ttf",
+                 "runescript-variable.ttf", "runescript-monospace-variable.ttf"):
         with open(os.path.join(FONTS_DIR, name), "rb") as fh:
             data = base64.b64encode(fh.read()).decode("ascii")
         fonts[name] = "data:font/ttf;base64," + data
 
+    widths = master_stroke_widths(groups)
     embed = {
         "characters": {"characters": [e["char"] for e in entries], "glyphs": entries},
         "fonts": fonts,
+        # mastery osi wght — podgląd rozstawia je na skali wg grubości obrysu
+        "masters": [{"weight": w,
+                     "strokeWidth": widths.get(w),
+                     "style": WEIGHT_STYLES.get(w, str(w))}
+                    for w in sorted(groups)],
     }
     # </ w treści JSON-a zakończyłoby przedwcześnie tag <script>
     payload = json.dumps(embed, ensure_ascii=False).replace("</", "<\\/")
@@ -636,17 +878,51 @@ def main(mono_px=MONO_PX, letter_space=LETTER_SPACE_PX, y_shift=Y_SHIFT_PX,
         raise SystemExit(f"Brak plików SVG w {SVG_DIR}")
     os.makedirs(FONTS_DIR, exist_ok=True)
 
-    # ustal skalę, linię bazową i metryki pionowe z geometrii (zanim zbudujemy glify):
-    resolve_metrics(files, y_shift, ink_em_ratio)
+    groups = group_by_weight(files)
+    if not groups:
+        raise SystemExit("Żaden plik nie pasuje do wzorca "
+                         "'Letter=..., Name=..., Width=..., Weight=....svg'")
+    if DEFAULT_WEIGHT not in groups:
+        raise SystemExit(f"Brak wagi domyślnej {DEFAULT_WEIGHT} — mam tylko {sorted(groups)}")
 
-    # zawsze budujemy dwa artefakty:
-    build_font(files, OUT, "RuneScript",
-               monospace=False, mono_px=mono_px, letter_space=letter_space)
-    build_font(files, OUT_MONO, "RuneScript Monospace",
-               monospace=True, mono_px=mono_px, letter_space=letter_space)
+    counts = {w: len(f) for w, f in groups.items()}
+    print("Wagi w źródle: " + ", ".join(f"{w} ({n} glifów)" for w, n in counts.items()))
+    if len(set(counts.values())) > 1:
+        print("  UWAGA: wagi mają różną liczbę glifów — mastery muszą mieć identyczny "
+              "komplet, inaczej varLib odrzuci font")
+
+    base = groups[DEFAULT_WEIGHT]
+    weights = sorted(groups)
+
+    # Skalę i linię bazową ustalamy RAZ, z wagi domyślnej. Gdyby liczyć je per waga,
+    # cięższy master wychodziłby w innej skali i oś zmieniałaby wielkość liter,
+    # zamiast samej grubości kreski.
+    resolve_metrics(base, y_shift, ink_em_ratio)
+
+    # Metryki pionowe wspólne dla CAŁEJ rodziny, wzięte z najcięższej wagi.
+    # Gdyby każda waga miała własne, przełączenie na grubszą przesuwałoby wiersze,
+    # a najcięższa i tak zostałaby przycięta przez usWinAscent/usWinDescent.
+    ascent, descent = vertical_extent(groups[weights[-1]])
+    print(f"Metryki wspólne dla rodziny (z wagi {weights[-1]}): "
+          f"ascent={ascent} descent={descent}")
+
+    # warianty statyczne w katalogu głównym fontów — z wagi domyślnej
+    build_font(base, OUT, "RuneScript", monospace=False, mono_px=mono_px,
+               letter_space=letter_space, ascent=ascent, descent=descent)
+    build_font(base, OUT_MONO, "RuneScript Monospace", monospace=True, mono_px=mono_px,
+               letter_space=letter_space, ascent=ascent, descent=descent)
+
+    # warianty variable — po jednym masterze na wagę obecną w źródle
+    build_variable_font(groups, OUT_VAR, "RuneScript Variable",
+                        monospace=False, mono_px=mono_px, letter_space=letter_space)
+    build_variable_font(groups, OUT_MONO_VAR, "RuneScript Monospace Variable",
+                        monospace=True, mono_px=mono_px, letter_space=letter_space)
+
+    # komplet wag statycznie
+    build_static_family(groups, ascent, descent, mono_px, letter_space)
 
     # strona statyczna dla GitHub Pages — wszystko wbudowane w jeden plik:
-    write_static_page(files, os.path.join(DOCS_DIR, "index.html"))
+    write_static_page(groups, os.path.join(DOCS_DIR, "index.html"))
 
 
 if __name__ == "__main__":

@@ -20,6 +20,10 @@
       --thumb: #3a3a3a;
       --thumb-hover: #4e4e4e;
 
+      /* szerokość kciuka suwaka — znaczniki masterów wcinają się o jej połowę,
+         żeby skrajne wypadały dokładnie pod kciukiem */
+      --thumb-size: 16px;
+
       /* proporcje panelu — nadpisywane z localStorage przez skrypt */
       --panel-w: 350px;   /* trzymaj zgodnie z PANEL_W_DEFAULT w skrypcie */
       --composer-h: 33.333vh;
@@ -175,6 +179,44 @@
       accent-color: var(--accent);
       cursor: pointer;
     }
+    /* skala masterów pod suwakiem wagi — znaczniki stoją tam, gdzie wypada ich
+       grubość obrysu w zakresie od najcieńszego do najgrubszego mastera */
+    .switcher .masters {
+      position: relative;
+      height: 26px;
+      margin-top: 2px;
+      user-select: none;
+    }
+    .switcher .masters button {
+      position: absolute;
+      top: 0;
+      transform: translateX(-50%);
+      padding: 0;
+      border: none;
+      background: none;
+      font-size: 0.6rem;
+      line-height: 1;
+      color: #5a5a5a;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .switcher .masters button::before {
+      content: "";
+      display: block;
+      width: 1px;
+      height: 4px;
+      margin: 0 auto 3px;
+      background: #4a4a4a;
+    }
+    .switcher .masters button:hover { color: var(--fg); background: none; }
+    .switcher .masters button:hover::before { background: var(--fg); }
+    .switcher .masters button.current { color: var(--accent); }
+    .switcher .masters button.current::before { background: var(--accent); height: 6px; }
+
+    /* grupa nieaktywna (suwak wagi przy czcionce bez osi) */
+    .switcher .group.disabled { opacity: 0.35; }
+    .switcher .group.disabled input[type="range"] { cursor: not-allowed; }
+
     .switcher .ticks {
       display: flex;
       justify-content: space-between;
@@ -247,6 +289,7 @@
       </div>
 
       <!-- suwaki buduje skrypt (patrz slider()) — markup każdego jest identyczny -->
+      <div class="group" id="weight-slider"></div>
       <div class="group" id="size-slider"></div>
       <div class="group" id="lh-slider"></div>
       <div class="group" id="ls-slider"></div>
@@ -328,20 +371,30 @@
     applyLayout();
 
     // --- fonty wklejone w stronę jako data: URL (patrz write_static_page) ------
-    [["RuneScript", "runescript.ttf"],
-     ["RuneScript Monospace", "runescript-monospace.ttf"]].forEach(([family, file]) => {
-      new FontFace(family, `url(${EMBED ? EMBED.fonts[file] : ""}) format("truetype")`).load()
+    // Wariant variable dostaje deskryptor wagi 300..700 — bez niego przeglądarka
+    // przycięłaby oś do domyślnego 400 i suwak nic by nie zmieniał.
+    [["RuneScript", "runescript.ttf", {}],
+     ["RuneScript Monospace", "runescript-monospace.ttf", {}],
+     ["RuneScript Variable", "runescript-variable.ttf", { weight: "100 900" }],
+     ["RuneScript Mono Variable", "runescript-monospace-variable.ttf", { weight: "100 900" }],
+    ].forEach(([family, file, desc]) => {
+      new FontFace(family, `url(${EMBED ? EMBED.fonts[file] : ""}) format("truetype")`, desc)
+        .load()
         .then(f => document.fonts.add(f))
         .catch(err => console.error("Nie udało się wczytać fontu", family, err));
     });
 
     // --- panel sterowania podglądem -----------------------------------------
+    // variable: true włącza suwak wagi (font-variation-settings) dla tej pozycji
     const FONTS = [
-      ["Arial",                'Arial, Helvetica, sans-serif'],
-      ["Consolas",             'Consolas, "Courier New", monospace'],
-      ["RuneScript",           '"RuneScript", monospace'],
-      ["RuneScript Monospace", '"RuneScript Monospace", monospace'],
+      ["Arial",       { stack: 'Arial, Helvetica, sans-serif' }],
+      ["Consolas",    { stack: 'Consolas, "Courier New", monospace' }],
+      ["RuneScript",  { stack: '"RuneScript", monospace' }],
+      ["RS Monospace", { stack: '"RuneScript Monospace", monospace' }],
+      ["RS Variable", { stack: '"RuneScript Variable", monospace', variable: true }],
+      ["RS Mono Var", { stack: '"RuneScript Mono Variable", monospace', variable: true }],
     ];
+    const WEIGHT_RANGE = { min: 100, max: 900, default: 400 };
     // wartości suwaków — suwak indeksuje listę, więc nie ustawia wartości pośrednich
     const SIZES = [12, 16, 24, 42, 64];        // px
     const LINE_HEIGHTS = [1, 1.2, 1.35, 1.5];
@@ -371,7 +424,113 @@
 
     const selectFont = buttonGroup(
       document.getElementById("font-options"), FONTS,
-      stack => { input.style.fontFamily = stack; });
+      font => {
+        input.style.fontFamily = font.stack;
+        setWeightEnabled(!!font.variable);
+      });
+
+    // --- suwak wagi: oś wght fontu variable ---------------------------------
+    // Suwak jest wyskalowany GRUBOŚCIĄ KRESKI, nie wartością wght. Dzięki temu
+    // pozycja znacznika 400 to dokładnie ta pozycja, na której font rysuje kreskę
+    // 1.0px — czyli tyle, ile ma referencyjny plik SVG tej wagi. Przy skali
+    // liniowej względem wght tak by nie było, bo przyrost grubości nie jest
+    // liniowy względem wagi (400->500 to +0.2px, ale 700->900 tylko +0.3px).
+    //
+    // Przeliczenie jest dokładne: font interpoluje współrzędne liniowo względem
+    // wght, więc między dwoma masterami grubość też jest liniowa względem wght.
+    // Odwzorowanie pozycja -> grubość -> wght trafia zatem w żądaną grubość
+    // co do jednostki, a nie w przybliżeniu.
+    const MASTERS = (EMBED && EMBED.masters || [])
+      .filter(m => m.strokeWidth != null)
+      .sort((a, b) => a.strokeWidth - b.strokeWidth);
+    const HAS_MASTERS = MASTERS.length > 1;
+    const SW_MIN = HAS_MASTERS ? MASTERS[0].strokeWidth : 0;
+    const SW_MAX = HAS_MASTERS ? MASTERS[MASTERS.length - 1].strokeWidth : 1;
+    const STEPS = 1000;   // rozdzielczość suwaka (pozycja 0..STEPS)
+
+    const posToWidth = pos => SW_MIN + (pos / STEPS) * (SW_MAX - SW_MIN);
+    const widthToPos = sw => Math.round((sw - SW_MIN) / (SW_MAX - SW_MIN) * STEPS);
+
+    // Pozycja suwaka jest liczbą całkowitą, więc rzadko wypada IDEALNIE na grubości
+    // mastera (np. 400 wychodziłoby jako 400.3). Na pozycjach masterów bierzemy
+    // więc wartości wprost z pliku, zamiast je odtwarzać z pozycji — tylko wtedy
+    // znacznik 400 daje kreskę co do jednostki taką jak referencyjny SVG.
+    const SNAP = new Map(MASTERS.map(m => [widthToPos(m.strokeWidth), m]));
+
+    /** Grubość -> wght, liniowo między sąsiednimi masterami. */
+    function widthToWeight(sw) {
+      if (!HAS_MASTERS) return WEIGHT_RANGE.default;
+      for (let i = 1; i < MASTERS.length; i++) {
+        const a = MASTERS[i - 1], b = MASTERS[i];
+        if (sw <= b.strokeWidth || i === MASTERS.length - 1) {
+          const t = (sw - a.strokeWidth) / (b.strokeWidth - a.strokeWidth);
+          return a.weight + t * (b.weight - a.weight);
+        }
+      }
+      return MASTERS[0].weight;
+    }
+
+    const weightGroup = document.getElementById("weight-slider");
+    const weightReadout = document.createElement("b");
+    const weightCaption = document.createElement("span");
+    weightCaption.className = "label";
+    weightCaption.append("Waga (wght) ", weightReadout);
+
+    const weightRange = document.createElement("input");
+    weightRange.type = "range";
+    weightRange.min = "0";
+    weightRange.max = String(STEPS);
+    weightRange.step = "1";
+    weightRange.setAttribute("aria-label", "Waga czcionki");
+
+    // po jednym znaczniku na master; pozycja = jego grubość na skali suwaka
+    const weightMasters = document.createElement("div");
+    weightMasters.className = "masters";
+    const masterButtons = MASTERS.map(m => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = m.weight;
+      b.title = `${m.style} — wght ${m.weight}, kreska ${m.strokeWidth}px (jak w SVG)`;
+      b.style.left = trackOffset(widthToPos(m.strokeWidth) / STEPS);
+      b.addEventListener("click", () => {
+        weightRange.value = String(widthToPos(m.strokeWidth));
+        applyWeight();
+      });
+      weightMasters.appendChild(b);
+      return b;
+    });
+
+    /** Środek kciuka nie sięga krawędzi toru — wcinamy znaczniki o jego połowę,
+     *  inaczej skrajne mastery wypadałyby obok kciuka zamiast pod nim. */
+    function trackOffset(frac) {
+      return `calc(var(--thumb-size) / 2 + (100% - var(--thumb-size)) * ${frac})`;
+    }
+
+    weightGroup.append(weightCaption, weightRange, weightMasters);
+
+    function applyWeight() {
+      const pos = Number(weightRange.value);
+      const master = SNAP.get(pos) || null;
+      const sw = master ? master.strokeWidth : posToWidth(pos);
+      const wght = master ? master.weight : widthToWeight(sw);
+
+      weightReadout.textContent = HAS_MASTERS
+        ? `${Math.round(wght)} · ${sw.toFixed(2)}px`
+        : Math.round(wght);
+      input.style.fontVariationSettings = `"wght" ${wght.toFixed(1)}`;
+      masterButtons.forEach((b, i) => b.classList.toggle("current", MASTERS[i] === master));
+    }
+    weightRange.addEventListener("input", applyWeight);
+
+    // start na wadze domyślnej — czyli dokładnie na grubości z plików SVG
+    const startMaster = MASTERS.find(m => m.weight === WEIGHT_RANGE.default);
+    weightRange.value = String(startMaster ? widthToPos(startMaster.strokeWidth)
+                                           : Math.round(STEPS / 2));
+
+    function setWeightEnabled(on) {
+      weightRange.disabled = !on;
+      weightGroup.classList.toggle("disabled", !on);
+    }
 
     /** Suwak skokowy po liście wartości. `label` opisuje wartość pod odczytem
      *  i podziałką, `tick` (opcjonalnie) skraca ją do podziałki. */
@@ -426,7 +585,8 @@
     });
 
     // stan początkowy (suwaki ustawiają się same przy tworzeniu)
-    selectFont(2);           // RuneScript Regular
+    applyWeight();
+    selectFont(2);           // RuneScript Regular (wyłącza suwak wagi)
 
     // --- grid ze wszystkimi znakami czcionki --------------------------------
     if (EMBED) {
