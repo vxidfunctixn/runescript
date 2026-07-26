@@ -66,9 +66,10 @@ FONTS_DIR = os.path.join(HERE, "fonts")
 OUT = os.path.join(FONTS_DIR, "runescript.ttf")                 # wariant proporcjonalny
 OUT_MONO = os.path.join(FONTS_DIR, "runescript-monospace.ttf")  # wariant monospace
 
-# Strona statyczna dla GitHub Pages ląduje w dist/ — jeden samowystarczalny plik:
+# Strona statyczna dla GitHub Pages ląduje w docs/ (Source: branch main, katalog
+# /docs) — jeden samowystarczalny plik:
 # fonty i lista znaków wklejone w HTML, więc nie ma żadnych pobrań w runtime.
-DIST_DIR = os.path.join(HERE, "dist")
+DOCS_DIR = os.path.join(HERE, "docs")
 TEMPLATE_HTML = os.path.join(HERE, "index.html")
 
 FNAME_RE = re.compile(
@@ -592,7 +593,7 @@ def sorted_characters(files):
 
 
 def write_static_page(files, out_path):
-    """Generuje samowystarczalny dist/index.html na bazie index.html.
+    """Generuje samowystarczalny docs/index.html na bazie index.html.
 
     Do <head> wstrzykujemy window.__RUNESCRIPT_EMBED__ z listą znaków oraz
     fontami jako data: URL — strona działa wtedy z dowolnego katalogu i bez
@@ -645,7 +646,7 @@ def main(mono_px=MONO_PX, letter_space=LETTER_SPACE_PX, y_shift=Y_SHIFT_PX,
                monospace=True, mono_px=mono_px, letter_space=letter_space)
 
     # strona statyczna dla GitHub Pages — wszystko wbudowane w jeden plik:
-    write_static_page(files, os.path.join(DIST_DIR, "index.html"))
+    write_static_page(files, os.path.join(DOCS_DIR, "index.html"))
 
 
 if __name__ == "__main__":

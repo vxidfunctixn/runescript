@@ -261,7 +261,7 @@
   </section>
 
   <script>
-    // Ten plik jest tylko szablonem — gotową stronę (dist/index.html) składa
+    // Ten plik jest tylko szablonem — gotową stronę (docs/index.html) składa
     // build_font.py, wstrzykując tu fonty i listę znaków. Bez tego nie ma czego
     // pokazać, bo nic nie jest pobierane w runtime.
     const EMBED = window.__RUNESCRIPT_EMBED__ || null;
@@ -435,7 +435,7 @@
       input.value = glyphs.map(g => g.char).join("");
     } else {
       document.getElementById("grid").innerHTML =
-        '<p class="empty">To jest szablon — otwórz <code>dist/index.html</code> ' +
+        '<p class="empty">To jest szablon — otwórz <code>docs/index.html</code> ' +
         '(generuje je <code>python build_font.py</code>)</p>';
     }
 

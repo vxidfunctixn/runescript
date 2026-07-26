@@ -27,12 +27,12 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt
 
-      - name: Build font and static page (dist/)
+      - name: Build font and static page (docs/)
         run: python build_font.py
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: docs
 
   deploy:
     needs: build
